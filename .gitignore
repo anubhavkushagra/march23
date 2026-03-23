@@ -1,0 +1,4 @@
+*.sock
+build/
+logs/
+data/
