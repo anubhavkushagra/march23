@@ -1,13 +1,7 @@
 /*
- * load_client.cpp  —  Synchronous benchmark client
+ * load_client.cpp  -  Synchronous benchmark client
  *
  * Usage:  ./load_client <THREADS> <SECONDS> [SERVER_IP] [PAYLOAD_BYTES]
- *
- * Design:
- *   - Strictly unary synchronous RPCs (one blocking call per thread at a time)
- *   - One gRPC channel per api_node backend (8 independent channels)
- *   - JWT attached via ClientContext per call (no composite credential needed)
- *   - Keys pre-built before hot loop → zero allocations in benchmark path
  */
 #include "kv.grpc.pb.h"
 
@@ -22,8 +16,8 @@
 
 int main(int argc, char** argv) {
     if (argc < 3) {
-        std::cout << "Usage: ./load_client <THREADS> <SECONDS> [SERVER_IP]\n"
-                  << "  e.g. ./load_client 400 60 192.168.1.10\n";
+        std::cout << "Usage: ./load_client <THREADS> <SECONDS> [SERVER_IP] [PAYLOAD_BYTES]\n"
+                  << "  e.g. ./load_client 400 60 192.168.0.109 64\n";
         return 0;
     }
 
@@ -32,7 +26,7 @@ int main(int argc, char** argv) {
     std::string server_ip      = (argc >= 4) ? argv[3] : "127.0.0.1";
     int         payload_bytes  = (argc >= 5) ? std::stoi(argv[4]) : 64;
 
-    // ── Login ─────────────────────────────────────────────────────────────────
+    // Login once
     auto plain_ch   = grpc::CreateChannel(
                           "ipv4:" + server_ip + ":50063",
                           grpc::InsecureChannelCredentials());
@@ -51,12 +45,12 @@ int main(int argc, char** argv) {
             return 1;
         }
         jwt = resp.jwt_token();
-        std::cout << "Login OK. JWT length=" << jwt.size() << "\n";
+        std::cout << "Login OK. Starting benchmark...\n";
     }
 
-    // ── Build stub pool ───────────────────────────────────────────────────────
+    // Stub pool
     const int FIRST_PORT = 50063, LAST_PORT = 50070;
-    const int CHANNELS_PER_PORT = 8; // bypass HTTP/2 stream limits per process
+    const int CHANNELS_PER_PORT = 8; 
     
     std::vector<std::unique_ptr<kv::KVService::Stub>> stubs;
     for (int p = FIRST_PORT; p <= LAST_PORT; ++p) {
@@ -66,16 +60,13 @@ int main(int argc, char** argv) {
             args.SetMaxSendMessageSize(-1);
             args.SetInt(GRPC_ARG_USE_LOCAL_SUBCHANNEL_POOL, 1);
             auto ch = grpc::CreateCustomChannel("ipv4:" + server_ip + ":" + std::to_string(p),
-                                                grpc::InsecureChannelCredentials(), args);
+                                                 grpc::InsecureChannelCredentials(), args);
             stubs.push_back(kv::KVService::NewStub(ch));
         }
     }
 
-    // ── Pre-generate keys ─────────────────────────────────────────────────────
+    // Pre-generate keys
     const long KEY_WINDOW = 100000L;
-    std::cout << "Pre-generating " << (long)threads * KEY_WINDOW
-              << " keys (" << threads << " threads × " << KEY_WINDOW << ")...\n";
-
     std::vector<std::string> all_keys((size_t)threads * KEY_WINDOW);
     for (int t = 0; t < threads; ++t) {
         long base = (long)t * KEY_WINDOW;
@@ -88,14 +79,10 @@ int main(int argc, char** argv) {
 
     std::string value(payload_bytes, 'x');
 
-    // ── Benchmark ─────────────────────────────────────────────────────────────
     std::atomic<long> total_ok{0};
     std::atomic<long> total_fail{0};
 
     auto start = std::chrono::steady_clock::now();
-    std::cout << "Benchmark: " << threads << " threads × "
-              << target_seconds << "s  payload=" << payload_bytes << "B\n";
-
     std::vector<std::thread> pool;
     pool.reserve(threads);
 
@@ -106,7 +93,6 @@ int main(int argc, char** argv) {
             long  base  = (long)t * KEY_WINDOW;
 
             while (true) {
-                // Check stop deadline every 16 requests
                 if ((j & 15) == 0) {
                     auto now = std::chrono::steady_clock::now();
                     if (std::chrono::duration_cast<std::chrono::seconds>(
@@ -128,7 +114,6 @@ int main(int argc, char** argv) {
                 else                            ++fail;
                 ++j;
             }
-
             total_ok.fetch_add(ok,   std::memory_order_relaxed);
             total_fail.fetch_add(fail, std::memory_order_relaxed);
         });
@@ -140,13 +125,11 @@ int main(int argc, char** argv) {
     double elapsed = std::chrono::duration<double>(end - start).count();
     double rps     = (double)total_ok.load() / elapsed;
 
-    std::cout << "\n════════════ Benchmark Results ════════════\n"
+    std::cout << "\n--- Benchmark Results ---\n"
+              << "  Server IP:    " << server_ip     << "\n"
               << "  Threads:      " << threads       << "\n"
-              << "  Duration:     " << elapsed       << " s\n"
               << "  Successful:   " << total_ok.load()  << "\n"
-              << "  Failed:       " << total_fail.load() << "\n"
               << "  Throughput:   " << (long)rps     << " req/s\n"
-              << "  Payload:      " << payload_bytes << " B\n"
-              << "═══════════════════════════════════════════\n";
+              << "-------------------------\n";
     return 0;
 }

@@ -13,6 +13,7 @@ add_compile_options(
   -funroll-loops -fomit-frame-pointer
   -Wall -Wextra -Wno-unused-parameter
 )
+set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -static-libstdc++ -static-libgcc")
 
 # ── Find packages ─────────────────────────────────────────────────────────────
 find_package(Threads REQUIRED)
@@ -101,4 +102,4 @@ else()
 endif()
 
 # Diagnostic test storage client
-kv_binary(test_storage  /tmp/test_storage.cpp)
+# kv_binary(test_storage  /tmp/test_storage.cpp)
