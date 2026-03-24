@@ -216,11 +216,21 @@ int main(int argc, char** argv) {
     builder.SetMaxReceiveMessageSize(-1);
     builder.SetMaxSendMessageSize(-1);
 
-    // SSL/TLS Setup
-    std::string server_cert = ReadFile("../certs/server.crt");
-    std::string server_key  = ReadFile("../certs/server.key");
+    // Robust SSL/TLS Search
+    std::vector<std::string> search_paths = {
+        "certs/", "../certs/", "../../certs/", 
+        "/home/devatha/Downloads/files/certs/"
+    };
+    
+    std::string server_cert, server_key;
+    for (const auto& p : search_paths) {
+        server_cert = ReadFile(p + "server.crt");
+        server_key  = ReadFile(p + "server.key");
+        if (!server_cert.empty() && !server_key.empty()) break;
+    }
+
     if (server_cert.empty() || server_key.empty()) {
-        std::cerr << "Failed to load SSL certificates!\n";
+        std::cerr << "CRITICAL: Could not load server.crt/key from any search path!\n";
         return 1;
     }
 

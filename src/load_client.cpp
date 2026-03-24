@@ -44,10 +44,15 @@ int main(int argc, char** argv) {
     auto channel_creds = ca_cert.empty() ? grpc::InsecureChannelCredentials() 
                                          : grpc::SslCredentials(ssl_opts);
 
+    grpc::ChannelArguments login_args;
+    if (!ca_cert.empty()) {
+        login_args.SetSslTargetNameOverride("kv-server");
+    }
+
     // Login once
-    auto plain_ch   = grpc::CreateChannel(
+    auto plain_ch   = grpc::CreateCustomChannel(
                           "ipv4:" + server_ip + ":50063",
-                          channel_creds);
+                          channel_creds, login_args);
     auto login_stub = kv::KVService::NewStub(plain_ch);
 
     std::string jwt;
@@ -78,7 +83,7 @@ int main(int argc, char** argv) {
             args.SetMaxSendMessageSize(-1);
             args.SetInt(GRPC_ARG_USE_LOCAL_SUBCHANNEL_POOL, 1);
             if (!ca_cert.empty()) {
-                args.SetSslTargetNameOverride(server_ip);
+                args.SetSslTargetNameOverride("kv-server");
             }
             auto ch = grpc::CreateCustomChannel("ipv4:" + server_ip + ":" + std::to_string(p),
                                                  channel_creds, args);
