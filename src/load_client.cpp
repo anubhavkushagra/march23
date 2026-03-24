@@ -77,6 +77,9 @@ int main(int argc, char** argv) {
             args.SetMaxReceiveMessageSize(-1);
             args.SetMaxSendMessageSize(-1);
             args.SetInt(GRPC_ARG_USE_LOCAL_SUBCHANNEL_POOL, 1);
+            if (!ca_cert.empty()) {
+                args.SetSslTargetNameOverride(server_ip);
+            }
             auto ch = grpc::CreateCustomChannel("ipv4:" + server_ip + ":" + std::to_string(p),
                                                  channel_creds, args);
             stubs.push_back(kv::KVService::NewStub(ch));
