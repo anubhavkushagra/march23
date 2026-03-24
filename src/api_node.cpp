@@ -18,6 +18,7 @@
 #include <cctype>
 #include <condition_variable>
 #include <cstdlib>
+#include <fstream>
 #include <grpcpp/grpcpp.h>
 #include <iostream>
 #include <memory>
@@ -33,6 +34,17 @@ static constexpr int    DEADLINE_MS  = 5000;
 
 static const std::string JWT_SECRET  = "your-very-secret-key";
 static std::atomic<long> g_total_ok{0};
+
+// Helper to read certificate files
+std::string ReadFile(const std::string& path) {
+    std::ifstream t(path);
+    if (!t.is_open()) {
+        std::cerr << "Could not open file: " << path << "\n";
+        return "";
+    }
+    return std::string((std::istreambuf_iterator<char>(t)),
+                        std::istreambuf_iterator<char>());
+}
 
 // ── Pending request ───────────────────────────────────────────────────────────
 struct PendingRequest {
@@ -204,8 +216,20 @@ int main(int argc, char** argv) {
     builder.SetMaxReceiveMessageSize(-1);
     builder.SetMaxSendMessageSize(-1);
 
+    // SSL/TLS Setup
+    std::string server_cert = ReadFile("../certs/server.crt");
+    std::string server_key  = ReadFile("../certs/server.key");
+    if (server_cert.empty() || server_key.empty()) {
+        std::cerr << "Failed to load SSL certificates!\n";
+        return 1;
+    }
+
+    grpc::SslServerCredentialsOptions::PemKeyCertPair pkcp = {server_key, server_cert};
+    grpc::SslServerCredentialsOptions ssl_opts;
+    ssl_opts.pem_key_cert_pairs.push_back(pkcp);
+
     builder.AddListeningPort("0.0.0.0:" + port_str,
-                             grpc::InsecureServerCredentials());
+                             grpc::SslServerCredentials(ssl_opts));
     builder.RegisterService(&service);
 
     auto server = builder.BuildAndStart();

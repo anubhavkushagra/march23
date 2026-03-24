@@ -7,12 +7,21 @@
 
 #include <atomic>
 #include <chrono>
+#include <fstream>
 #include <grpcpp/grpcpp.h>
 #include <iostream>
 #include <memory>
 #include <string>
 #include <thread>
 #include <vector>
+
+// Helper to read certificate files
+std::string ReadFile(const std::string& path) {
+    std::ifstream t(path);
+    if (!t.is_open()) return "";
+    return std::string((std::istreambuf_iterator<char>(t)),
+                        std::istreambuf_iterator<char>());
+}
 
 int main(int argc, char** argv) {
     if (argc < 3) {
@@ -26,10 +35,19 @@ int main(int argc, char** argv) {
     std::string server_ip      = (argc >= 4) ? argv[3] : "127.0.0.1";
     int         payload_bytes  = (argc >= 5) ? std::stoi(argv[4]) : 64;
 
+    // SSL/TLS Setup
+    std::string ca_cert = ReadFile("ca.crt");
+    if (ca_cert.empty()) ca_cert = ReadFile("../certs/ca.crt"); // Path fallback
+
+    grpc::SslCredentialsOptions ssl_opts;
+    ssl_opts.pem_root_certs = ca_cert;
+    auto channel_creds = ca_cert.empty() ? grpc::InsecureChannelCredentials() 
+                                         : grpc::SslCredentials(ssl_opts);
+
     // Login once
     auto plain_ch   = grpc::CreateChannel(
                           "ipv4:" + server_ip + ":50063",
-                          grpc::InsecureChannelCredentials());
+                          channel_creds);
     auto login_stub = kv::KVService::NewStub(plain_ch);
 
     std::string jwt;
@@ -60,7 +78,7 @@ int main(int argc, char** argv) {
             args.SetMaxSendMessageSize(-1);
             args.SetInt(GRPC_ARG_USE_LOCAL_SUBCHANNEL_POOL, 1);
             auto ch = grpc::CreateCustomChannel("ipv4:" + server_ip + ":" + std::to_string(p),
-                                                 grpc::InsecureChannelCredentials(), args);
+                                                 channel_creds, args);
             stubs.push_back(kv::KVService::NewStub(ch));
         }
     }
