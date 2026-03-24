@@ -14,12 +14,11 @@
 #include <grpcpp/grpcpp.h>
 #include <iostream>
 #include <memory>
-#include <rocksdb/db.h>
+#include <rocksdb/utilities/transaction_db.h>
 #include <rocksdb/filter_policy.h>
 #include <rocksdb/options.h>
 #include <rocksdb/rate_limiter.h>
 #include <rocksdb/slice.h>
-#include <rocksdb/statistics.h>
 #include <rocksdb/table.h>
 #include <rocksdb/write_batch.h>
 #include <string>
@@ -30,8 +29,8 @@ static std::atomic<long> total_batches{0};
 static std::atomic<long> total_keys{0};
 
 class StorageServiceImpl final : public kv::KVService::Service {
-    rocksdb::DB*          db_;
-    rocksdb::WriteOptions w_opts_;
+    rocksdb::TransactionDB* db_;
+    rocksdb::WriteOptions    w_opts_;
 
 public:
     explicit StorageServiceImpl(const std::string& data_dir) {
@@ -86,11 +85,10 @@ public:
         opt.rate_limiter.reset(rocksdb::NewGenericRateLimiter(
             rate_mb * 1024 * 1024LL, 100'000, 10));
 
-        // unordered_write gives higher throughput when strict ordering isn't
-        // required (safe here because WAL is disabled anyway).
-        // NOTE: unordered_write is incompatible with enable_pipelined_write in RocksDB v6.x
-        opt.enable_pipelined_write = false;
-        opt.unordered_write        = true;   // requires WAL off or snapshot-less
+        // ── ACID Safety vs Throughput ─────────────────────────────────────
+        // unordered_write is RELAXED; we disable it for stricter ACID.
+        opt.enable_pipelined_write = true;
+        opt.unordered_write        = false;
 
         // ── Block cache & bloom filters ────────────────────────────────────
         rocksdb::BlockBasedTableOptions topt;
@@ -102,20 +100,20 @@ public:
         opt.table_factory.reset(
             rocksdb::NewBlockBasedTableFactory(topt));
 
-        rocksdb::Status s = rocksdb::DB::Open(opt, data_dir, &db_);
+        rocksdb::TransactionDBOptions txn_opt;
+        rocksdb::Status s = rocksdb::TransactionDB::Open(opt, txn_opt, data_dir, &db_);
         if (!s.ok()) {
-            std::cerr << "DB::Open failed (" << data_dir << "): "
+            std::cerr << "TransactionDB::Open failed (" << data_dir << "): "
                       << s.ToString() << "\n";
             std::exit(1);
         }
 
-        // WAL disabled — we trade crash-safety for maximum TPS.
-        // sync=false means OS page cache holds writes (lost on crash).
-        w_opts_.disableWAL = true;
-        w_opts_.sync       = false;
-
-        // low_pri=true lets compaction I/O yield to foreground writes
-        w_opts_.low_pri    = true;
+        // ── Durability ───────────────────────────────────────────────────
+        // disableWAL=false (default) + sync=true = Absolute Safety.
+        // Once db->Write returns OK, it is physically written to disk.
+        w_opts_.disableWAL = false;
+        w_opts_.sync       = true;
+        w_opts_.low_pri    = false; // High priority for safety-critical writes
     }
 
     ~StorageServiceImpl() { delete db_; }
@@ -177,35 +175,33 @@ public:
             }
         }
 
-        // ── Pass 2: single WriteBatch for all PUTs + DELETEs ──────────────
-        // One db_->Write() call goes through the write group leader once,
-        // amortising all internal locking across every key in the batch.
-        thread_local rocksdb::WriteBatch wb;
-        wb.Clear();
+        // Wrap the batch in a transaction for Atomicity & Isolation
+        rocksdb::TransactionOptions txn_opts;
+        txn_opts.set_snapshot    = true; // Repeatable Read
+        txn_opts.deadlock_detect = true; // Safety in pessimistic locking
+        
+        std::unique_ptr<rocksdb::Transaction> txn(db_->BeginTransaction(w_opts_, txn_opts));
+        if (!txn) return grpc::Status(grpc::StatusCode::INTERNAL, "Failed to begin transaction");
 
-        int write_count = 0;
         for (int i = 0; i < n; ++i) {
             const auto& r = req->requests(i);
             if (r.type() == kv::PUT) {
-                wb.Put(r.key(), r.value());
-                ++write_count;
+                txn->Put(r.key(), r.value());
             } else if (r.type() == kv::DELETE) {
-                wb.Delete(r.key());
-                ++write_count;
+                txn->Delete(r.key());
             }
         }
 
-        if (write_count > 0) {
-            rocksdb::Status s = db_->Write(w_opts_, &wb);
-            bool ok = s.ok();
-            for (int i = 0; i < n; ++i) {
-                const auto& r = req->requests(i);
-                if (r.type() == kv::PUT || r.type() == kv::DELETE)
-                    resp->mutable_responses(i)->set_success(ok);
-            }
-            if (!ok)
-                return grpc::Status(grpc::StatusCode::INTERNAL, s.ToString());
+        rocksdb::Status s = txn->Commit();
+        bool ok = s.ok();
+        for (int i = 0; i < n; ++i) {
+            const auto& r = req->requests(i);
+            if (r.type() == kv::PUT || r.type() == kv::DELETE)
+                resp->mutable_responses(i)->set_success(ok);
         }
+
+        if (!ok)
+            return grpc::Status(grpc::StatusCode::INTERNAL, s.ToString());
 
         total_batches.fetch_add(1, std::memory_order_relaxed);
         total_keys.fetch_add(n,    std::memory_order_relaxed);
